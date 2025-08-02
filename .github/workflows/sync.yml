@@ -2,7 +2,7 @@ name: Sync with upstream
 
 on:
   schedule:
-    - cron: '0 16 * * *'  # 每天 UTC 16:00 (北京时间凌晨 0:00) 执行
+    - cron: '48 3 * * *'  # 每天 UTC 16:00 (北京时间凌晨 0:00) 执行
   workflow_dispatch:  # 允许手动触发
 
 jobs:
@@ -11,7 +11,7 @@ jobs:
     
     steps:
     - name: Checkout
-    cbiodw  uses: actions/checkout@v2
+      uses: actions/checkout@v2
       with:
         fetch-depth: 0  # 获取所有历史，以便能够推送
         
