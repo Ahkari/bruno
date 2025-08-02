@@ -11,7 +11,7 @@ jobs:
     
     steps:
     - name: Checkout
-      uses: actions/checkout@v2
+    cbiodw  uses: actions/checkout@v2
       with:
         fetch-depth: 0  # 获取所有历史，以便能够推送
         
