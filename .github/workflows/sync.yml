@@ -2,7 +2,7 @@ name: Sync with upstream
 
 on:
   schedule:
-    - cron: '48 3 * * *'  # 每天 UTC 16:00 (北京时间凌晨 0:00) 执行
+    - cron: '05 4 * * *'  # 每天 UTC 16:00 (北京时间凌晨 0:00) 执行
   workflow_dispatch:  # 允许手动触发
 
 jobs:
@@ -28,13 +28,16 @@ jobs:
       run: |
         git fetch upstream
         
-    - name: Merge upstream
+    - name: Merge upstream excluding .github folder
       run: |
         git checkout main
-        git merge upstream/main --no-edit
+        git merge -X theirs --no-commit upstream/main
+        git reset .github/
+        git checkout -- .github/
+        git commit -m "Sync with upstream (excluding .github folder)"
         
     - name: Push changes
       uses: ad-m/github-push-action@master
       with:
-        github_token: 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
+        github_token: ${{ secrets.GITHUB_TOKEN }}
         branch: main
