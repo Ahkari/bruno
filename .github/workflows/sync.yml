@@ -1,0 +1,21 @@
+name: Sync with upstream
+on:
+  schedule:
+    cron: '17 11 * * *'  # 每天 11:17 执行  # '0 0 * * *' 每天凌晨执行
+  workflow_dispatch:     # 允许手动触发
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/usebruno/bruno.git
+      - name: Fetch upstream changes
+        run: git fetch upstream main
+      - name: Merge upstream into main
+        run: |
+          git checkout main
+          git merge --allow-unrelated-histories upstream/main -m "Sync with upstream"
+      - name: Push changes to origin
+        run: git push origin main
