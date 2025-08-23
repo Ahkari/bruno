@@ -1,6 +1,6 @@
 import React from 'react';
 import { uuid } from 'utils/common';
-import { IconFiles, IconRun, IconEye, IconSettings } from '@tabler/icons';
+import { IconFiles, IconRun, IconEye, IconSettings, IconGitMerge } from '@tabler/icons';
 import EnvironmentSelector from 'components/Environments/EnvironmentSelector';
 import { addTab } from 'providers/ReduxStore/slices/tabs';
 import { useDispatch } from 'react-redux';
@@ -41,6 +41,16 @@ const CollectionToolBar = ({ collection }) => {
     );
   };
 
+  const viewGit = () => {
+    dispatch(
+      addTab({
+        uid: uuid(),
+        collectionUid: collection.uid,
+        type: 'git'
+      })
+    );
+  };
+
   return (
     <StyledWrapper>
       <div className="flex items-center p-2">
@@ -53,7 +63,12 @@ const CollectionToolBar = ({ collection }) => {
             <JsSandboxMode collection={collection} />
           </span>
           <span className="mr-3">
-            <ToolHint text="Runner" toolhintId="RunnnerToolhintId" place='bottom'>
+            <ToolHint text="Git" toolhintId="GitToolhintId" place="bottom">
+              <IconGitMerge className="cursor-pointer" size={18} strokeWidth={1.5} onClick={viewGit} />
+            </ToolHint>
+          </span>
+          <span className="mr-3">
+            <ToolHint text="Runner" toolhintId="RunnnerToolhintId" place="bottom">
               <IconRun className="cursor-pointer" size={18} strokeWidth={1.5} onClick={handleRun} />
             </ToolHint>
           </span>

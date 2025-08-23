@@ -4,7 +4,7 @@ const isDev = require('electron-is-dev');
 const os = require('os');
 
 if (isDev) {
-  if(!fs.existsSync(path.join(__dirname, '../../bruno-js/src/sandbox/bundle-browser-rollup.js'))) {
+  if (!fs.existsSync(path.join(__dirname, '../../bruno-js/src/sandbox/bundle-browser-rollup.js'))) {
     console.log('JS Sandbox libraries have not been bundled yet');
     console.log('Please run the below command \nnpm run sandbox:bundle-libraries --workspace=packages/bruno-js');
     throw new Error('JS Sandbox libraries have not been bundled yet');
@@ -16,8 +16,10 @@ const { BrowserWindow, app, session, Menu, globalShortcut, ipcMain } = require('
 const { setContentSecurityPolicy } = require('electron-util');
 
 if (isDev && process.env.ELECTRON_USER_DATA_PATH) {
-  console.debug("`ELECTRON_USER_DATA_PATH` found, modifying `userData` path: \n"
-    + `\t${app.getPath("userData")} -> ${process.env.ELECTRON_USER_DATA_PATH}`);
+  console.debug(
+    '`ELECTRON_USER_DATA_PATH` found, modifying `userData` path: \n' +
+      `\t${app.getPath('userData')} -> ${process.env.ELECTRON_USER_DATA_PATH}`
+  );
 
   app.setPath('userData', process.env.ELECTRON_USER_DATA_PATH);
 }
@@ -36,6 +38,7 @@ const LastOpenedCollections = require('./store/last-opened-collections');
 const registerNetworkIpc = require('./ipc/network');
 const registerCollectionsIpc = require('./ipc/collection');
 const registerFilesystemIpc = require('./ipc/filesystem');
+const registerVscIpc = require('./ipc/vsc');
 const registerPreferencesIpc = require('./ipc/preferences');
 const collectionWatcher = require('./app/collection-watcher');
 const { loadWindowState, saveBounds, saveMaximized } = require('./utils/window');
@@ -53,14 +56,16 @@ const contentSecurityPolicy = [
   "default-src 'self'",
   "connect-src 'self' https://*.posthog.com",
   "font-src 'self' https: data:;",
-  "frame-src data:",
+  'frame-src data: http://127.0.0.1:*',
   // this has been commented out to make oauth2 work
   // "form-action 'none'",
   // we make an exception and allow http for images so that
   // they can be used as link in the embedded markdown editors
   "img-src 'self' blob: data: http: https:",
   "media-src 'self' blob: data: https:",
-  "style-src 'self' 'unsafe-inline' https:"
+  "style-src 'self' 'unsafe-inline' https:",
+  "script-src 'self' 'unsafe-inline'",
+  "worker-src 'self' blob: data: https:"
 ];
 
 setContentSecurityPolicy(contentSecurityPolicy.join(';') + ';');
@@ -71,18 +76,17 @@ let mainWindow;
 
 // Prepare the renderer once the app is ready
 app.on('ready', async () => {
-
   if (isDev) {
     const { installExtension, REDUX_DEVTOOLS, REACT_DEVELOPER_TOOLS } = require('electron-devtools-installer');
     try {
       const extensions = await installExtension([REDUX_DEVTOOLS, REACT_DEVELOPER_TOOLS], {
-        loadExtensionOptions: {allowFileAccess: true},
-      })
-      console.log(`Added Extensions:  ${extensions.map(ext => ext.name).join(", ")}`)
-      await require("node:timers/promises").setTimeout(1000);
+        loadExtensionOptions: { allowFileAccess: true }
+      });
+      console.log(`Added Extensions:  ${extensions.map((ext) => ext.name).join(', ')}`);
+      await require('node:timers/promises').setTimeout(1000);
       session.defaultSession.getAllExtensions().map((ext) => {
         console.log(`Loading Extension: ${ext.name}`);
-        session.defaultSession.loadExtension(ext.path)
+        session.defaultSession.loadExtension(ext.path);
       });
     } catch (err) {
       console.error('An error occurred while loading extensions: ', err);
@@ -178,20 +182,31 @@ app.on('ready', async () => {
     }
     return { action: 'deny' };
   });
-  
+
+  // Quick fix for Electron issue #29996: https://github.com/electron/electron/issues/29996
+  globalShortcut.register('Ctrl+=', () => {
+    mainWindow.webContents.setZoomLevel(mainWindow.webContents.getZoomLevel() + 1);
+  });
+
+  globalShortcut.register('CommandOrControl+M', () => {
+    mainWindow.minimize();
+  });
+
+  globalShortcut.register('CommandOrControl+H', () => {
+    mainWindow.minimize();
+  });
 
   mainWindow.webContents.on('did-finish-load', async () => {
     let ogSend = mainWindow.webContents.send;
-    mainWindow.webContents.send = function(channel, ...args) {
-      return ogSend.apply(this, [channel, ...args?.map(_ => {
-        // todo: replace this with @msgpack/msgpack encode/decode
-        return safeParseJSON(safeStringifyJSON(_));
-      })]);
-    }
-    
-    // Handle onboarding
-    await onboardUser(mainWindow, lastOpenedCollections);
-    
+    mainWindow.webContents.send = function (channel, ...args) {
+      return ogSend.apply(this, [
+        channel,
+        ...args?.map((_) => {
+          // todo: replace this with @msgpack/msgpack encode/decode
+          return safeParseJSON(safeStringifyJSON(_));
+        })
+      ]);
+    };
     // Send cookies list after renderer is ready
     try {
       cookiesStore.initializeCookies();
@@ -211,6 +226,7 @@ app.on('ready', async () => {
   registerPreferencesIpc(mainWindow, collectionWatcher, lastOpenedCollections);
   registerNotificationsIpc(mainWindow, collectionWatcher);
   registerFilesystemIpc(mainWindow);
+  registerVscIpc(mainWindow);
 });
 
 // Quit the app once all windows are closed
