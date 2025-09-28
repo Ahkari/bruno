@@ -3,8 +3,6 @@ const https = require('https');
 const axios = require('axios');
 const path = require('path');
 const decomment = require('decomment');
-const fs = require('fs');
-const tls = require('tls');
 const contentDispositionParser = require('content-disposition');
 const mime = require('mime-types');
 const FormData = require('form-data');
@@ -32,6 +30,11 @@ const { getProcessEnvVars } = require('../../store/process-env');
 const { getBrunoConfig } = require('../../store/bruno-config');
 const Oauth2Store = require('../../store/oauth2');
 const { isRequestTagsIncluded } = require('@usebruno/common');
+const { cookiesStore } = require('../../store/cookies');
+const registerGrpcEventHandlers = require('./grpc-event-handlers');
+const { getCertsAndProxyConfig } = require('./cert-utils');
+
+const ERROR_OCCURRED_WHILE_EXECUTING_REQUEST = 'Error occurred while executing the request!';
 
 const saveCookies = (url, headers) => {
   if (preferencesUtil.shouldStoreCookies()) {
@@ -51,109 +54,17 @@ const saveCookies = (url, headers) => {
 
 const getJsSandboxRuntime = (collection) => {
   const securityConfig = get(collection, 'securityConfig', {});
-  return securityConfig.jsSandboxMode === 'safe' ? 'quickjs' : 'vm2';
+
+  if (securityConfig.jsSandboxMode === 'safe') {
+    return 'quickjs';
+  }
+
+  if (preferencesUtil.isBetaFeatureEnabled('nodevm')) {
+    return 'nodevm';
+  }
+
+  return 'vm2';
 };
-
-const getCertsAndProxyConfig = async ({
-  collectionUid,
-  request,
-  envVars,
-  runtimeVariables,
-  processEnvVars,
-  collectionPath
-}) => {
-  /**
-   * @see https://github.com/usebruno/bruno/issues/211 set keepAlive to true, this should fix socket hang up errors
-   * @see https://github.com/nodejs/node/pull/43522 keepAlive was changed to true globally on Node v19+
-   */
-  const httpsAgentRequestFields = { keepAlive: true };
-  if (!preferencesUtil.shouldVerifyTls()) {
-    httpsAgentRequestFields['rejectUnauthorized'] = false;
-  }
-
-  if (preferencesUtil.shouldUseCustomCaCertificate()) {
-    const caCertFilePath = preferencesUtil.getCustomCaCertificateFilePath();
-    if (caCertFilePath) {
-      let caCertBuffer = fs.readFileSync(caCertFilePath);
-      if (preferencesUtil.shouldKeepDefaultCaCertificates()) {
-        caCertBuffer += '\n' + tls.rootCertificates.join('\n'); // Augment default truststore with custom CA certificates
-      }
-      httpsAgentRequestFields['ca'] = caCertBuffer;
-    }
-  }
-
-  const brunoConfig = getBrunoConfig(collectionUid);
-  const interpolationOptions = {
-    envVars,
-    runtimeVariables,
-    processEnvVars
-  };
-
-  // client certificate config
-  const clientCertConfig = get(brunoConfig, 'clientCertificates.certs', []);
-
-  for (let clientCert of clientCertConfig) {
-    const domain = interpolateString(clientCert?.domain, interpolationOptions);
-    const type = clientCert?.type || 'cert';
-    if (domain) {
-      const hostRegex = '^https:\\/\\/' + domain.replaceAll('.', '\\.').replaceAll('*', '.*');
-      if (request.url.match(hostRegex)) {
-        if (type === 'cert') {
-          try {
-            let certFilePath = interpolateString(clientCert?.certFilePath, interpolationOptions);
-            certFilePath = path.isAbsolute(certFilePath) ? certFilePath : path.join(collectionPath, certFilePath);
-            let keyFilePath = interpolateString(clientCert?.keyFilePath, interpolationOptions);
-            keyFilePath = path.isAbsolute(keyFilePath) ? keyFilePath : path.join(collectionPath, keyFilePath);
-
-            httpsAgentRequestFields['cert'] = fs.readFileSync(certFilePath);
-            httpsAgentRequestFields['key'] = fs.readFileSync(keyFilePath);
-          } catch (err) {
-            console.error('Error reading cert/key file', err);
-            throw new Error('Error reading cert/key file' + err);
-          }
-        } else if (type === 'pfx') {
-          try {
-            let pfxFilePath = interpolateString(clientCert?.pfxFilePath, interpolationOptions);
-            pfxFilePath = path.isAbsolute(pfxFilePath) ? pfxFilePath : path.join(collectionPath, pfxFilePath);
-            httpsAgentRequestFields['pfx'] = fs.readFileSync(pfxFilePath);
-          } catch (err) {
-            console.error('Error reading pfx file', err);
-            throw new Error('Error reading pfx file' + err);
-          }
-        }
-        httpsAgentRequestFields['passphrase'] = interpolateString(clientCert.passphrase, interpolationOptions);
-        break;
-      }
-    }
-  }
-
-  /**
-   * Proxy configuration
-   * 
-   * Preferences proxyMode has three possible values: on, off, system
-   * Collection proxyMode has three possible values: true, false, global
-   * 
-   * When collection proxyMode is true, it overrides the app-level proxy settings
-   * When collection proxyMode is false, it ignores the app-level proxy settings
-   * When collection proxyMode is global, it uses the app-level proxy settings
-   * 
-   * Below logic calculates the proxyMode and proxyConfig to be used for the request
-   */
-  let proxyMode = 'off';
-  let proxyConfig = {};
-
-  const collectionProxyConfig = get(brunoConfig, 'proxy', {});
-  const collectionProxyEnabled = get(collectionProxyConfig, 'enabled', 'global');
-  if (collectionProxyEnabled === true) {
-    proxyConfig = collectionProxyConfig;
-    proxyMode = 'on';
-  } else if (collectionProxyEnabled === 'global') {
-    proxyConfig = preferencesUtil.getGlobalProxyConfig();
-    proxyMode = get(proxyConfig, 'mode', 'off');
-  }
-  
-  return { proxyMode, proxyConfig, httpsAgentRequestFields, interpolationOptions };
-}
 
 const configureRequest = async (
   collectionUid,
@@ -202,7 +113,7 @@ const configureRequest = async (
   if (request.oauth2) {
     let requestCopy = cloneDeep(request);
     const { oauth2: { grantType, tokenPlacement, tokenHeaderPrefix, tokenQueryKey } = {} } = requestCopy || {};
-    let credentials, credentialsId;
+    let credentials, credentialsId, oauth2Url, debugInfo;
     switch (grantType) {
       case 'authorization_code':
         interpolateVars(requestCopy, envVars, runtimeVariables, processEnvVars);
@@ -467,6 +378,11 @@ const registerNetworkIpc = (mainWindow) => {
         collectionUid
       });
 
+      mainWindow.webContents.send('main:persistent-env-variables-update', {
+        persistentEnvVariables: scriptResult.persistentEnvVariables,
+        collectionUid
+      });
+
       mainWindow.webContents.send('main:global-environment-variables-update', {
         globalEnvironmentVariables: scriptResult.globalEnvironmentVariables
       });
@@ -497,6 +413,8 @@ const registerNetworkIpc = (mainWindow) => {
 
     if (request.headers['content-type'] === 'multipart/form-data') {
       if (!(request.data instanceof FormData)) {
+        request._originalMultipartData = request.data;
+        request.collectionPath = collectionPath;
         let form = createFormData(request.data, collectionPath);
         request.data = form;
         extend(request.headers, form.getHeaders());
@@ -541,6 +459,11 @@ const registerNetworkIpc = (mainWindow) => {
           collectionUid
         });
 
+        mainWindow.webContents.send('main:persistent-env-variables-update', {
+          persistentEnvVariables: result.persistentEnvVariables,
+          collectionUid
+        });
+
         mainWindow.webContents.send('main:global-environment-variables-update', {
           globalEnvironmentVariables: result.globalEnvironmentVariables
         });
@@ -579,6 +502,11 @@ const registerNetworkIpc = (mainWindow) => {
         envVariables: scriptResult.envVariables,
         runtimeVariables: scriptResult.runtimeVariables,
         requestUid,
+        collectionUid
+      });
+
+      mainWindow.webContents.send('main:persistent-env-variables-update', {
+        persistentEnvVariables: scriptResult.persistentEnvVariables,
         collectionUid
       });
 
@@ -748,7 +676,7 @@ const registerNetworkIpc = (mainWindow) => {
           // timeline prop won't be accessible in the usual way in the renderer process if we reject the promise
           return {
             statusText: error.statusText,
-            error: error.message || 'Error occured while executing the request!',
+            error: error.message || ERROR_OCCURRED_WHILE_EXECUTING_REQUEST,
             timeline: error.timeline
           }
         }
@@ -771,6 +699,7 @@ const registerNetworkIpc = (mainWindow) => {
       const domainsWithCookies = await getDomainsWithCookies();
 
       mainWindow.webContents.send('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookies)));
+      cookiesStore.saveCookieJar();
 
       let postResponseScriptResult = null;
       let postResponseError = null;
@@ -885,6 +814,11 @@ const registerNetworkIpc = (mainWindow) => {
           collectionUid
         });
 
+        mainWindow.webContents.send('main:persistent-env-variables-update', {
+          persistentEnvVariables: testResults.persistentEnvVariables,
+          collectionUid
+        });
+
         mainWindow.webContents.send('main:global-environment-variables-update', {
           globalEnvironmentVariables: testResults.globalEnvironmentVariables
         });
@@ -900,6 +834,7 @@ const registerNetworkIpc = (mainWindow) => {
 
         const domainsWithCookiesTest = await getDomainsWithCookies();
         mainWindow.webContents.send('main:cookies-update', safeParseJSON(safeStringifyJSON(domainsWithCookiesTest)));
+        cookiesStore.saveCookieJar();
       }
 
       return {
@@ -920,7 +855,7 @@ const registerNetworkIpc = (mainWindow) => {
       // timeline prop won't be accessible in the usual way in the renderer process if we reject the promise
       return {
         status: error?.status,
-        error: error?.message || 'Error occured while executing the request!',
+        error: error?.message || ERROR_OCCURRED_WHILE_EXECUTING_REQUEST,
         timeline: error?.timeline
       };
     }
@@ -1061,6 +996,24 @@ const registerNetworkIpc = (mainWindow) => {
             type: 'request-queued',
             ...eventData
           });
+
+          // Skip gRPC requests
+          if (item.type === 'grpc-request') {
+            mainWindow.webContents.send('main:run-folder-event', {
+              type: 'runner-request-skipped',
+              error: 'gRPC requests are skipped in folder/collection runs',
+              responseReceived: {
+                status: 'skipped',
+                statusText: 'gRPC request skipped',
+                data: null,
+                responseTime: 0,
+                headers: null
+              },
+              ...eventData
+            });
+            currentRequestIndex++;
+            continue;
+          }
 
           const request = await prepareRequest(item, collection, abortController);
           request.__bruno__executionMode = 'runner';
@@ -1420,7 +1373,8 @@ const registerNetworkIpc = (mainWindow) => {
               type: 'testrun-ended',
               collectionUid,
               folderUid,
-              statusText: 'collection run was terminated!'
+              statusText: 'collection run was terminated!',
+              runCompletionTime: new Date().toISOString(),
             });
             break;
           }
@@ -1449,7 +1403,8 @@ const registerNetworkIpc = (mainWindow) => {
         mainWindow.webContents.send('main:run-folder-event', {
           type: 'testrun-ended',
           collectionUid,
-          folderUid
+          folderUid,
+          runCompletionTime: new Date().toISOString(),
         });
       } catch (error) {
         console.log("error", error);
@@ -1458,6 +1413,7 @@ const registerNetworkIpc = (mainWindow) => {
           type: 'testrun-ended',
           collectionUid,
           folderUid,
+          runCompletionTime: new Date().toISOString(),
           error: error && !error.isCancel ? error : null
         });
       }
@@ -1543,11 +1499,17 @@ const executeRequestOnFailHandler = async (request, error) => {
   } catch (handlerError) {
     console.error('Error executing onFail handler', handlerError);
     // @TODO: This is a temporary solution to display the error message in the response pane. Revisit and handle properly.
-    error.message = `1. Request failed: ${error.message || 'Error occured while executing the request!'}\n2. Error executing onFail handler: ${handlerError.message || 'Unknown error'}`;
+    error.message = `1. Request failed: ${error.message || ERROR_OCCURRED_WHILE_EXECUTING_REQUEST}\n2. Error executing onFail handler: ${handlerError.message || 'Unknown error'}`;
   }
 };
 
-module.exports = registerNetworkIpc;
+
+const registerAllNetworkIpc = (mainWindow) => {
+  registerNetworkIpc(mainWindow);
+  registerGrpcEventHandlers(mainWindow);
+}
+
+module.exports = registerAllNetworkIpc
 module.exports.configureRequest = configureRequest;
 module.exports.getCertsAndProxyConfig = getCertsAndProxyConfig;
 module.exports.fetchGqlSchemaHandler = fetchGqlSchemaHandler;
